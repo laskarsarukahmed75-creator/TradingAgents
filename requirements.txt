@@ -6,7 +6,7 @@ requests
 langchain
 langchain-community
 langchain-core
-langchain-google-genai
+langchain-google-genai>=2.0.0
 langchain-openai
 python-dotenv
 tiktoken
@@ -15,5 +15,3 @@ typer
 stockstats
 langgraph
 langgraph-checkpoint-sqlite
-
-
