@@ -20,3 +20,4 @@ flask
 matplotlib
 pymongo
 langchain-groq
+gunicorn
