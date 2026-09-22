@@ -1,24 +1,30 @@
+import os
+import threading
+from http.server import HTTPServer, BaseHTTPRequestHandler
 from tradingagents.default_config import DEFAULT_CONFIG
 from tradingagents.graph.trading_graph import TradingAgentsGraph
 
-# DEFAULT_CONFIG already applies TRADINGAGENTS_* env-var overrides
-# (llm_provider, deep_think_llm, quick_think_llm, backend_url, etc.),
-# so users can switch models or endpoints purely via .env without
-# editing this script. Override individual keys here only when you
-# want a hard-coded value that should ignore the environment.
+# Render ka Port Error fix karne ke liye dummy server
+def run_dummy_server():
+    port = int(os.environ.get("PORT", 10000))
+    server = HTTPServer(("0.0.0.0", port), BaseHTTPRequestHandler)
+    server.serve_forever()
+
+threading.Thread(target=run_dummy_server, daemon=True).start()
+
+# Gemini aur Trading Agents Configuration
 config = DEFAULT_CONFIG.copy()
-
-# --- Google Gemini Configuration (OpenAI की जगह जोड़ा गया) ---
 config["llm_provider"] = "google"
-config["deep_think_llm"] = "gemini-3.6-flash"
-config["quick_think_llm"] = "gemini-3.6-flash"
-# ----------------------------------------------------------
+config["deep_think_llm"] = "gemini-2.5-flash"
+config["quick_think_llm"] = "gemini-2.5-flash"
 
-# Initialize with custom config
+# StockTwits aur Reddit ke 403/429 block se bachne ke liye
+config["use_social_sentiment"] = False
+
+# Agents Graph initialize karein
 ta = TradingAgentsGraph(debug=True, config=config)
 
-# forward propagate
+# NVDA share ka signal test karein
 _, decision = ta.propagate("NVDA", "2026-09-01")
+print("\n=== FINAL TRADING SIGNAL ===")
 print(decision)
-
-# Memorize mistakes and reflect
