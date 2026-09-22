@@ -16,3 +16,7 @@ stockstats
 langgraph
 langgraph-checkpoint-sqlite
 pyTelegramBotAPI
+flask
+matplotlib
+pymongo
+langchain-groq
