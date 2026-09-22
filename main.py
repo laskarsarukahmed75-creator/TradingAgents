@@ -10,8 +10,8 @@ config = DEFAULT_CONFIG.copy()
 
 # --- Google Gemini Configuration (OpenAI की जगह जोड़ा गया) ---
 config["llm_provider"] = "google"
-config["deep_think_llm"] = "gemini-2.0-flash"
-config["quick_think_llm"] = "gemini-2.0-flash"
+config["deep_think_llm"] = "gemini-3.6-flash"
+config["quick_think_llm"] = "gemini-3.6-flash"
 # ----------------------------------------------------------
 
 # Initialize with custom config
