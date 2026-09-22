@@ -1,4 +1,3 @@
-
 pandas
 numpy
 praw
@@ -14,3 +13,7 @@ tiktoken
 rich
 typer
 stockstats
+langgraph
+langgraph-checkpoint-sqlite
+
+
