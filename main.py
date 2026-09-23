@@ -4,10 +4,10 @@ import datetime
 import io
 import threading
 import matplotlib
-matplotlib.use('Agg')  # Server पर बिना GUI के चार्ट बनाने के लिए
+matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 import yfinance as yf
-from flask import Flask, request, abort
+from flask import Flask
 import telebot
 from telebot import types
 from pymongo import MongoClient
@@ -30,7 +30,7 @@ if MONGO_URI:
     except Exception as e:
         logger.error(f"❌ MongoDB Connection Failed: {e}")
 else:
-    logger.warning("⚠️ MONGO_URI not set. Database features will be disabled.")
+    logger.warning("⚠️ MONGO_URI not set.")
 
 def save_signal_to_db(ticker, date, decision):
     if db is not None:
@@ -61,88 +61,56 @@ except Exception as e:
     ta = None
 
 def run_analysis_with_fallback(ticker, date):
-    """Runs analysis using Gemini, falls back to Groq if Gemini fails."""
     global ta
     try:
-        # Try with Gemini first
         _, decision = ta.propagate(ticker, date)
         return decision
     except Exception as e:
         logger.warning(f"Gemini failed for {ticker}: {e}. Switching to Groq...")
         try:
-            # Fallback to Groq
             fallback_config = config.copy()
             fallback_config["llm_provider"] = "groq"
             fallback_config["deep_think_llm"] = "llama-3.3-70b-versatile"
             fallback_config["quick_think_llm"] = "llama-3.3-70b-versatile"
-            
             fallback_ta = TradingAgentsGraph(debug=False, config=fallback_config)
             _, decision = fallback_ta.propagate(ticker, date)
             logger.info(f"✅ Groq Fallback Successful for {ticker}")
             return decision
         except Exception as fallback_error:
             logger.error(f"❌ Groq Fallback also failed: {fallback_error}")
-            raise Exception("Both Gemini and Groq failed to analyze.")
+            raise Exception("Both Gemini and Groq failed.")
 
 # --- 4. Chart Generation ---
 def generate_chart(ticker):
     try:
         stock = yf.Ticker(ticker)
         hist = stock.history(period="1mo")
-        if hist.empty:
-            return None
+        if hist.empty: return None
         plt.figure(figsize=(10, 5))
         plt.plot(hist.index, hist['Close'], label='Close Price', color='blue')
         plt.title(f'{ticker} - Last 1 Month')
-        plt.xlabel('Date')
-        plt.ylabel('Price')
         plt.grid(True)
-        plt.legend()
         buf = io.BytesIO()
         plt.savefig(buf, format='png')
         buf.seek(0)
         plt.close()
         return buf
     except Exception as e:
-        logger.error(f"Chart generation failed for {ticker}: {e}")
+        logger.error(f"Chart generation failed: {e}")
         return None
 
 # --- 5. Telegram Bot Setup ---
 BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
-WEBHOOK_URL = os.environ.get("WEBHOOK_URL") # e.g., https://my-app.onrender.com
 bot = telebot.TeleBot(BOT_TOKEN)
 
-# --- 6. Telegram Webhook Setup (Gunicorn Compatible) ---
-if WEBHOOK_URL:
-    try:
-        bot.remove_webhook()
-        # drop_pending_updates=True से पुराने मैसेज हट जाते हैं और नया कनेक्शन साफ़ होता है
-        bot.set_webhook(url=f"{WEBHOOK_URL}/{BOT_TOKEN}", drop_pending_updates=True)
-        logger.info(f"✅ Webhook set to {WEBHOOK_URL}/{BOT_TOKEN}")
-    except Exception as e:
-        logger.error(f"❌ Failed to set webhook: {e}")
+# ⚡ CRITICAL: Remove any existing webhook so Polling can work smoothly
+try:
+    bot.remove_webhook()
+    logger.info("✅ Webhook removed. Polling will start now.")
+except Exception as e:
+    logger.warning(f"Webhook removal failed: {e}")
 
-# --- 7. Flask App for Webhook ---
-app = Flask(__name__)
-
-@app.route('/')
-def index():
-    return "Trading Bot is Running!", 200
-
-@app.route(f'/{BOT_TOKEN}', methods=['POST'])
-def webhook():
-    if request.headers.get('content-type') == 'application/json':
-        json_string = request.get_data().decode('utf-8')
-        update = telebot.types.Update.de_json(json_string)
-        
-        # ⚡ CRITICAL FIX: Process update in a separate thread to prevent Telegram Timeout
-        threading.Thread(target=bot.process_new_updates, args=([update],)).start()
-        
-        return '', 200
-    else:
-        abort(403)
-
-# --- 8. Telegram Message Handlers ---
+# --- 6. Telegram Message Handlers ---
 @bot.message_handler(commands=['start', 'help'])
 def send_welcome(message):
     text = ("🙏 *Namaste! Main aapka Advanced AI Trading Assistant hoon.*\n\n"
@@ -215,7 +183,20 @@ def handle_history(message):
     except Exception as e:
         bot.reply_to(message, "❌ History fetch karne mein error aaya.")
 
-# --- 9. Local Run (Only for testing) ---
+# --- 7. Start Polling in a Background Thread (Gunicorn Compatible) ---
+def start_polling():
+    logger.info("🚀 Starting Telegram Polling...")
+    bot.infinity_polling(timeout=60, long_polling_timeout=30)
+
+threading.Thread(target=start_polling, daemon=True).start()
+
+# --- 8. Flask App for Health Check (Render requires this) ---
+app = Flask(__name__)
+
+@app.route('/')
+def index():
+    return "Trading Bot is Running!", 200
+
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 10000))
     app.run(host="0.0.0.0", port=port)
