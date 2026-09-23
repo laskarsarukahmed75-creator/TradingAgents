@@ -3,6 +3,7 @@ import logging
 import datetime
 import io
 import threading
+import time
 import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
@@ -45,11 +46,10 @@ def save_signal_to_db(ticker, date, decision):
         except Exception as e:
             logger.error(f"MongoDB Insert Error: {e}")
 
-# --- 3. TradingAgents Configuration (MODEL UPGRADED) ---
+# --- 3. TradingAgents Configuration ---
 config = DEFAULT_CONFIG.copy()
 config["llm_provider"] = "google"
-# Gemini 1.5 Flash has much higher free tier limits than 2.5 Flash
-config["deep_think_llm"] = "gemini-1.5-flash"
+config["deep_think_llm"] = "gemini-1.5-flash" # यह लिमिट के हिसाब से बेस्ट है
 config["quick_think_llm"] = "gemini-1.5-flash"
 config["use_social_sentiment"] = False
 config["max_retries"] = 2
@@ -62,21 +62,17 @@ except Exception as e:
     ta = None
 
 def run_analysis_with_fallback(ticker, date):
-    """Runs analysis using Gemini, falls back to Groq IMMEDIATELY if Gemini fails."""
     global ta
     try:
-        # Try with Gemini first
         _, decision = ta.propagate(ticker, date)
         return decision
     except Exception as e:
         logger.warning(f"⚠️ Gemini failed for {ticker}: {e}. Switching to Groq...")
         try:
-            # Fallback to Groq (Make sure GROQ_API_KEY is in Render Env Vars)
             fallback_config = config.copy()
             fallback_config["llm_provider"] = "groq"
             fallback_config["deep_think_llm"] = "llama-3.3-70b-versatile"
             fallback_config["quick_think_llm"] = "llama-3.3-70b-versatile"
-            
             fallback_ta = TradingAgentsGraph(debug=False, config=fallback_config)
             _, decision = fallback_ta.propagate(ticker, date)
             logger.info(f"✅ Groq Fallback Successful for {ticker}")
@@ -111,7 +107,6 @@ bot = telebot.TeleBot(BOT_TOKEN)
 # ⚡ CRITICAL FIX FOR 409 ERROR: Clear any pending updates and old webhooks
 try:
     bot.remove_webhook()
-    # drop_pending_updates=True ensures we don't process old messages that caused 409
     bot.delete_webhook(drop_pending_updates=True) 
     logger.info("✅ Old Webhooks and Pending Updates cleared.")
 except Exception as e:
@@ -190,11 +185,23 @@ def handle_history(message):
     except Exception as e:
         bot.reply_to(message, "❌ History fetch karne mein error aaya.")
 
-# --- 7. Start Polling in a Background Thread ---
+# --- 7. Start Polling in a Background Thread (ROBUST RETRY) ---
 def start_polling():
     logger.info("🚀 Starting Telegram Polling...")
-    # non_stop=True और skip_pending=True से 409 Conflict कभी नहीं आएगा
-    bot.infinity_polling(timeout=60, long_polling_timeout=30, skip_pending=True)
+    while True:
+        try:
+            # non_stop=True और skip_pending=True से 409 Conflict हैंडल होगा
+            bot.infinity_polling(timeout=60, long_polling_timeout=30, skip_pending=True)
+        except telebot.apihelper.ApiTelegramException as e:
+            if e.error_code == 409:
+                logger.error("⚠️ 409 Conflict: Another instance is running (Old Render deployment). Retrying in 10 seconds...")
+                time.sleep(10) # 10 सेकंड रुककर फिर कोशिश करेगा
+            else:
+                logger.error(f"❌ Telegram API Error: {e}")
+                time.sleep(5)
+        except Exception as e:
+            logger.error(f"❌ Unexpected polling error: {e}")
+            time.sleep(5)
 
 threading.Thread(target=start_polling, daemon=True).start()
 
