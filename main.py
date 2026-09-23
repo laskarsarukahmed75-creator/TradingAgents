@@ -46,55 +46,50 @@ def save_signal_to_db(ticker, date, decision):
         except Exception as e:
             logger.error(f"MongoDB Insert Error: {e}")
 
-# --- 3. TradingAgents Configuration (UPDATED MODELS) ---
+# --- 3. TradingAgents Configuration (Updated Models) ---
+# Primary: Groq (High daily limits, fast)
+# Fallback: OpenRouter (Access to many free models)
 config = DEFAULT_CONFIG.copy()
-config["llm_provider"] = "google"
-# ✅ अब gemini-2.0-flash इस्तेमाल करें, यह स्टेबल है
-config["deep_think_llm"] = "gemini-2.0-flash"
-config["quick_think_llm"] = "gemini-2.0-flash"
+config["llm_provider"] = "groq"
+config["deep_think_llm"] = "llama-3.1-8b-instant"  # High daily limit model
+config["quick_think_llm"] = "llama-3.1-8b-instant"
 config["use_social_sentiment"] = False
 config["max_retries"] = 2
 
 try:
     ta = TradingAgentsGraph(debug=False, config=config)
-    logger.info("✅ TradingAgents Initialized with Gemini 2.0 Flash.")
+    logger.info("✅ TradingAgents Initialized with Groq (llama-3.1-8b-instant).")
 except Exception as e:
     logger.error(f"Failed to initialize TradingAgents: {e}")
     ta = None
 
 def run_analysis_with_fallback(ticker, date):
-    """Gemini फेल होने पर Groq के दो मॉडल्स को आजमाता है"""
+    """Runs analysis using Groq, falls back to OpenRouter if Groq fails."""
     global ta
-    # 1. पहले Gemini से कोशिश करें
+    
+    # 1. Try Primary Provider (Groq)
     try:
         _, decision = ta.propagate(ticker, date)
         return decision
     except Exception as e:
-        logger.warning(f"⚠️ Gemini failed for {ticker}: {e}. Switching to Groq...")
+        logger.warning(f"⚠️ Primary provider (Groq) failed for {ticker}: {e}. Switching to OpenRouter...")
     
-    # 2. अब Groq पर स्विच करें
-    groq_models = [
-        ("groq", "openai/gpt-oss-120b"),      # पहला विकल्प
-        ("groq", "llama-3.1-8b-instant")      # दूसरा विकल्प
-    ]
-    
-    for provider, model_name in groq_models:
-        try:
-            fallback_config = config.copy()
-            fallback_config["llm_provider"] = provider
-            fallback_config["deep_think_llm"] = model_name
-            fallback_config["quick_think_llm"] = model_name
-            
-            fallback_ta = TradingAgentsGraph(debug=False, config=fallback_config)
-            _, decision = fallback_ta.propagate(ticker, date)
-            logger.info(f"✅ Groq Fallback Successful with {model_name} for {ticker}")
-            return decision
-        except Exception as fallback_error:
-            logger.error(f"❌ Groq model {model_name} failed: {fallback_error}")
-            continue # अगला मॉडल ट्राई करें
-    
-    # अगर सब फेल हो जाएं
-    raise Exception("All Gemini and Groq models failed. Please check API keys and quotas.")
+    # 2. Fallback to OpenRouter
+    try:
+        fallback_config = config.copy()
+        fallback_config["llm_provider"] = "openrouter"
+        fallback_config["backend_url"] = "https://openrouter.ai/api/v1"
+        # OpenRouter uses "openai/gpt-oss-120b" or similar free models
+        fallback_config["deep_think_llm"] = "meta-llama/llama-3.3-70b-instruct"
+        fallback_config["quick_think_llm"] = "meta-llama/llama-3.3-70b-instruct"
+        
+        fallback_ta = TradingAgentsGraph(debug=False, config=fallback_config)
+        _, decision = fallback_ta.propagate(ticker, date)
+        logger.info(f"✅ Fallback Successful with OpenRouter for {ticker}")
+        return decision
+    except Exception as fallback_error:
+        logger.error(f"❌ Fallback provider (OpenRouter) also failed: {fallback_error}")
+        raise Exception("Both Primary and Fallback providers failed. Please check API keys and quotas.")
 
 # --- 4. Chart Generation ---
 def generate_chart(ticker):
@@ -119,6 +114,7 @@ def generate_chart(ticker):
 BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 bot = telebot.TeleBot(BOT_TOKEN)
 
+# ⚡ CRITICAL FIX FOR 409 ERROR: Clear any pending updates and old webhooks
 try:
     bot.remove_webhook()
     bot.delete_webhook(drop_pending_updates=True) 
@@ -132,7 +128,8 @@ def send_welcome(message):
     text = ("🙏 *Namaste! Main aapka Advanced AI Trading Assistant hoon.*\n\n"
             "📈 *Signal lene ke liye:* `/signal AAPL`\n"
             "📊 *Chart dekhne ke liye:* `/chart TSLA`\n"
-            "📜 *Pichle 5 signals dekhne ke liye:* `/history`")
+            "📜 *Pichle 5 signals dekhne ke liye:* `/history`\n\n"
+            "⚠️ *Note:* Ek baar signal lene ke baad 2-3 minute ka gap zaroor rakhein.")
     bot.reply_to(message, text, parse_mode='Markdown')
 
 @bot.message_handler(commands=['signal'])
@@ -148,7 +145,7 @@ def handle_signal(message):
         ticker = parts[1].upper().strip()
         current_date = datetime.datetime.now().strftime("%Y-%m-%d")
         
-        bot.reply_to(message, f"⏳ *AI Agents '{ticker}' ko analyze kar rahe hain...*\nKripya 30-60 second wait karein.", parse_mode='Markdown')
+        bot.reply_to(message, f"⏳ *AI Agents '{ticker}' ko analyze kar rahe hain...*\nKripya 2-3 minute wait karein.", parse_mode='Markdown')
         
         decision = run_analysis_with_fallback(ticker, current_date)
         save_signal_to_db(ticker, current_date, decision)
@@ -199,7 +196,7 @@ def handle_history(message):
     except Exception as e:
         bot.reply_to(message, "❌ History fetch karne mein error aaya.")
 
-# --- 7. Start Polling in a Background Thread (ROBUST RETRY) ---
+# --- 7. Start Polling in a Background Thread (Robust Retry) ---
 def start_polling():
     logger.info("🚀 Starting Telegram Polling...")
     while True:
@@ -207,8 +204,8 @@ def start_polling():
             bot.infinity_polling(timeout=60, long_polling_timeout=30, skip_pending=True)
         except telebot.apihelper.ApiTelegramException as e:
             if e.error_code == 409:
-                logger.error("⚠️ 409 Conflict: Another instance is running. Retrying in 10 seconds...")
-                time.sleep(10)
+                logger.error("⚠️ 409 Conflict: Another instance is running. Retrying in 15 seconds...")
+                time.sleep(15)
             else:
                 logger.error(f"❌ Telegram API Error: {e}")
                 time.sleep(5)
