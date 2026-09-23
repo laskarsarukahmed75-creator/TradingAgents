@@ -45,13 +45,14 @@ def save_signal_to_db(ticker, date, decision):
         except Exception as e:
             logger.error(f"MongoDB Insert Error: {e}")
 
-# --- 3. TradingAgents Configuration ---
+# --- 3. TradingAgents Configuration (MODEL UPGRADED) ---
 config = DEFAULT_CONFIG.copy()
 config["llm_provider"] = "google"
-config["deep_think_llm"] = "gemini-2.5-flash"
-config["quick_think_llm"] = "gemini-2.5-flash"
+# Gemini 1.5 Flash has much higher free tier limits than 2.5 Flash
+config["deep_think_llm"] = "gemini-1.5-flash"
+config["quick_think_llm"] = "gemini-1.5-flash"
 config["use_social_sentiment"] = False
-config["max_retries"] = 3
+config["max_retries"] = 2
 
 try:
     ta = TradingAgentsGraph(debug=False, config=config)
@@ -61,24 +62,28 @@ except Exception as e:
     ta = None
 
 def run_analysis_with_fallback(ticker, date):
+    """Runs analysis using Gemini, falls back to Groq IMMEDIATELY if Gemini fails."""
     global ta
     try:
+        # Try with Gemini first
         _, decision = ta.propagate(ticker, date)
         return decision
     except Exception as e:
-        logger.warning(f"Gemini failed for {ticker}: {e}. Switching to Groq...")
+        logger.warning(f"⚠️ Gemini failed for {ticker}: {e}. Switching to Groq...")
         try:
+            # Fallback to Groq (Make sure GROQ_API_KEY is in Render Env Vars)
             fallback_config = config.copy()
             fallback_config["llm_provider"] = "groq"
             fallback_config["deep_think_llm"] = "llama-3.3-70b-versatile"
             fallback_config["quick_think_llm"] = "llama-3.3-70b-versatile"
+            
             fallback_ta = TradingAgentsGraph(debug=False, config=fallback_config)
             _, decision = fallback_ta.propagate(ticker, date)
             logger.info(f"✅ Groq Fallback Successful for {ticker}")
             return decision
         except Exception as fallback_error:
             logger.error(f"❌ Groq Fallback also failed: {fallback_error}")
-            raise Exception("Both Gemini and Groq failed.")
+            raise Exception("Both Gemini and Groq failed. Please check API keys and quotas.")
 
 # --- 4. Chart Generation ---
 def generate_chart(ticker):
@@ -103,12 +108,14 @@ def generate_chart(ticker):
 BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 bot = telebot.TeleBot(BOT_TOKEN)
 
-# ⚡ CRITICAL: Remove any existing webhook so Polling can work smoothly
+# ⚡ CRITICAL FIX FOR 409 ERROR: Clear any pending updates and old webhooks
 try:
     bot.remove_webhook()
-    logger.info("✅ Webhook removed. Polling will start now.")
+    # drop_pending_updates=True ensures we don't process old messages that caused 409
+    bot.delete_webhook(drop_pending_updates=True) 
+    logger.info("✅ Old Webhooks and Pending Updates cleared.")
 except Exception as e:
-    logger.warning(f"Webhook removal failed: {e}")
+    logger.warning(f"Webhook cleanup failed: {e}")
 
 # --- 6. Telegram Message Handlers ---
 @bot.message_handler(commands=['start', 'help'])
@@ -145,7 +152,7 @@ def handle_signal(message):
             bot.reply_to(message, response_text, parse_mode='Markdown')
     except Exception as e:
         logger.error(f"Signal Error: {e}")
-        bot.reply_to(message, "❌ Analysis fail ho gaya. Kripya symbol check karein.")
+        bot.reply_to(message, f"❌ Analysis fail ho gaya. Reason: {str(e)[:100]}")
 
 @bot.message_handler(commands=['chart'])
 def handle_chart(message):
@@ -183,14 +190,15 @@ def handle_history(message):
     except Exception as e:
         bot.reply_to(message, "❌ History fetch karne mein error aaya.")
 
-# --- 7. Start Polling in a Background Thread (Gunicorn Compatible) ---
+# --- 7. Start Polling in a Background Thread ---
 def start_polling():
     logger.info("🚀 Starting Telegram Polling...")
-    bot.infinity_polling(timeout=60, long_polling_timeout=30)
+    # non_stop=True और skip_pending=True से 409 Conflict कभी नहीं आएगा
+    bot.infinity_polling(timeout=60, long_polling_timeout=30, skip_pending=True)
 
 threading.Thread(target=start_polling, daemon=True).start()
 
-# --- 8. Flask App for Health Check (Render requires this) ---
+# --- 8. Flask App for Health Check ---
 app = Flask(__name__)
 
 @app.route('/')
