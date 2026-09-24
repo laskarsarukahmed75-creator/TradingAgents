@@ -45,17 +45,17 @@ def save_signal_to_db(ticker, date, decision):
         except Exception as e:
             logger.error(f"MongoDB Insert Error: {e}")
 
-# --- 3. TradingAgents Setup (Using Official Gemini 2.0 Flash) ---
+# --- 3. TradingAgents Setup (Using Official Gemini 2.5 Flash) ---
 config = DEFAULT_CONFIG.copy()
 config["llm_provider"] = "google"
-config["deep_think_llm"] = "gemini-2.0-flash"
-config["quick_think_llm"] = "gemini-2.0-flash"
+config["deep_think_llm"] = "gemini-2.5-flash"
+config["quick_think_llm"] = "gemini-2.5-flash"
 config["use_social_sentiment"] = False
 config["max_retries"] = 2
 
 try:
     ta = TradingAgentsGraph(debug=False, config=config)
-    logger.info("TradingAgents Initialized with Gemini 2.0 Flash.")
+    logger.info("TradingAgents Initialized with Gemini 2.5 Flash.")
 except Exception as e:
     logger.error(f"Failed to initialize TradingAgents: {e}")
     ta = None
