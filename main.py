@@ -10,7 +10,6 @@ import matplotlib.pyplot as plt
 import yfinance as yf
 from flask import Flask
 import telebot
-from telebot import types
 from pymongo import MongoClient
 from tradingagents.default_config import DEFAULT_CONFIG
 from tradingagents.graph.trading_graph import TradingAgentsGraph
@@ -27,11 +26,11 @@ if MONGO_URI:
         client = MongoClient(MONGO_URI)
         db = client["trading_bot_db"]
         signals_collection = db["signals"]
-        logger.info("✅ MongoDB Connected Successfully!")
+        logger.info("MongoDB Connected Successfully!")
     except Exception as e:
-        logger.error(f"❌ MongoDB Connection Failed: {e}")
+        logger.error(f"MongoDB Connection Failed: {e}")
 else:
-    logger.warning("⚠️ MONGO_URI not set.")
+    logger.warning("MONGO_URI not set. Running without persistent database.")
 
 def save_signal_to_db(ticker, date, decision):
     if db is not None:
@@ -46,63 +45,34 @@ def save_signal_to_db(ticker, date, decision):
         except Exception as e:
             logger.error(f"MongoDB Insert Error: {e}")
 
-# --- 3. TradingAgents Configuration (Updated Models) ---
-# Primary: Groq (High daily limits, fast)
-# Fallback: OpenRouter (Access to many free models)
+# --- 3. TradingAgents Setup (Using Official Gemini 2.0 Flash) ---
 config = DEFAULT_CONFIG.copy()
-config["llm_provider"] = "groq"
-config["deep_think_llm"] = "llama-3.1-8b-instant"  # High daily limit model
-config["quick_think_llm"] = "llama-3.1-8b-instant"
+config["llm_provider"] = "google"
+config["deep_think_llm"] = "gemini-2.0-flash"
+config["quick_think_llm"] = "gemini-2.0-flash"
 config["use_social_sentiment"] = False
 config["max_retries"] = 2
 
 try:
     ta = TradingAgentsGraph(debug=False, config=config)
-    logger.info("✅ TradingAgents Initialized with Groq (llama-3.1-8b-instant).")
+    logger.info("TradingAgents Initialized with Gemini 2.0 Flash.")
 except Exception as e:
     logger.error(f"Failed to initialize TradingAgents: {e}")
     ta = None
-
-def run_analysis_with_fallback(ticker, date):
-    """Runs analysis using Groq, falls back to OpenRouter if Groq fails."""
-    global ta
-    
-    # 1. Try Primary Provider (Groq)
-    try:
-        _, decision = ta.propagate(ticker, date)
-        return decision
-    except Exception as e:
-        logger.warning(f"⚠️ Primary provider (Groq) failed for {ticker}: {e}. Switching to OpenRouter...")
-    
-    # 2. Fallback to OpenRouter
-    try:
-        fallback_config = config.copy()
-        fallback_config["llm_provider"] = "openrouter"
-        fallback_config["backend_url"] = "https://openrouter.ai/api/v1"
-        # OpenRouter uses "openai/gpt-oss-120b" or similar free models
-        fallback_config["deep_think_llm"] = "meta-llama/llama-3.3-70b-instruct"
-        fallback_config["quick_think_llm"] = "meta-llama/llama-3.3-70b-instruct"
-        
-        fallback_ta = TradingAgentsGraph(debug=False, config=fallback_config)
-        _, decision = fallback_ta.propagate(ticker, date)
-        logger.info(f"✅ Fallback Successful with OpenRouter for {ticker}")
-        return decision
-    except Exception as fallback_error:
-        logger.error(f"❌ Fallback provider (OpenRouter) also failed: {fallback_error}")
-        raise Exception("Both Primary and Fallback providers failed. Please check API keys and quotas.")
 
 # --- 4. Chart Generation ---
 def generate_chart(ticker):
     try:
         stock = yf.Ticker(ticker)
         hist = stock.history(period="1mo")
-        if hist.empty: return None
+        if hist.empty:
+            return None
         plt.figure(figsize=(10, 5))
-        plt.plot(hist.index, hist['Close'], label='Close Price', color='blue')
-        plt.title(f'{ticker} - Last 1 Month')
-        plt.grid(True)
+        plt.plot(hist.index, hist['Close'], label='Close Price', color='#00ffaa')
+        plt.title(f'{ticker} - 1 Month Price Trend')
+        plt.grid(True, linestyle='--', alpha=0.5)
         buf = io.BytesIO()
-        plt.savefig(buf, format='png')
+        plt.savefig(buf, format='png', bbox_inches='tight')
         buf.seek(0)
         plt.close()
         return buf
@@ -112,115 +82,114 @@ def generate_chart(ticker):
 
 # --- 5. Telegram Bot Setup ---
 BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
+if not BOT_TOKEN:
+    logger.error("TELEGRAM_BOT_TOKEN is missing from Environment Variables!")
+
 bot = telebot.TeleBot(BOT_TOKEN)
 
-# ⚡ CRITICAL FIX FOR 409 ERROR: Clear any pending updates and old webhooks
 try:
     bot.remove_webhook()
-    bot.delete_webhook(drop_pending_updates=True) 
-    logger.info("✅ Old Webhooks and Pending Updates cleared.")
+    bot.delete_webhook(drop_pending_updates=True)
+    logger.info("Webhooks cleared successfully.")
 except Exception as e:
-    logger.warning(f"Webhook cleanup failed: {e}")
+    logger.warning(f"Webhook cleanup warning: {e}")
 
-# --- 6. Telegram Message Handlers ---
+# --- 6. Telegram Handlers (Accepts both uppercase and lowercase) ---
 @bot.message_handler(commands=['start', 'help'])
 def send_welcome(message):
-    text = ("🙏 *Namaste! Main aapka Advanced AI Trading Assistant hoon.*\n\n"
-            "📈 *Signal lene ke liye:* `/signal AAPL`\n"
-            "📊 *Chart dekhne ke liye:* `/chart TSLA`\n"
-            "📜 *Pichle 5 signals dekhne ke liye:* `/history`\n\n"
-            "⚠️ *Note:* Ek baar signal lene ke baad 2-3 minute ka gap zaroor rakhein.")
+    text = (
+        "Namaste! Main aapka AI Trading Assistant hoon.\n\n"
+        "Stock Signal: `/signal AAPL` ya `/signal RELIANCE.NS`\n"
+        "Stock Chart: `/chart TSLA` ya `/chart TATAMOTORS.NS`\n"
+        "History: `/history`\n\n"
+        "*(Note: Ek analysis mein 30-60 second lag sakte hain)*"
+    )
     bot.reply_to(message, text, parse_mode='Markdown')
 
-@bot.message_handler(commands=['signal'])
+@bot.message_handler(func=lambda msg: msg.text and msg.text.split()[0].lower() in ['/signal', '/signal@alphabot_crypto_bot'])
 def handle_signal(message):
     if ta is None:
-        bot.reply_to(message, "❌ System initialize nahi ho paya.")
+        bot.reply_to(message, "System abhi ready nahi hai. Thodi der baad prayas karein.")
         return
     try:
         parts = message.text.split()
         if len(parts) < 2:
-            bot.reply_to(message, "⚠️ Example: `/signal RELIANCE.NS`", parse_mode='Markdown')
+            bot.reply_to(message, "Kripya stock symbol dein. Example: `/signal NVDA`", parse_mode='Markdown')
             return
-        ticker = parts[1].upper().strip()
+        
+        ticker = parts[1].upper().replace(" ", "").strip()
         current_date = datetime.datetime.now().strftime("%Y-%m-%d")
         
-        bot.reply_to(message, f"⏳ *AI Agents '{ticker}' ko analyze kar rahe hain...*\nKripya 2-3 minute wait karein.", parse_mode='Markdown')
+        bot.reply_to(message, f"AI Agents '{ticker}' ko analyze kar rahe hain... Kripya 30-60 second wait karein.")
         
-        decision = run_analysis_with_fallback(ticker, current_date)
-        save_signal_to_db(ticker, current_date, decision)
+        _, decision = ta.propagate(ticker, current_date)
+        save_signal_to_db(ticker, current_date, str(decision))
         
-        response_text = f"📊 *Analysis Report for {ticker}*\n\n{decision}"
+        response_text = f"Analysis Report for {ticker}:\n\n{decision}"
         if len(response_text) > 4000:
             for i in range(0, len(response_text), 4000):
-                bot.send_message(message.chat.id, response_text[i:i+4000], parse_mode='Markdown')
+                bot.send_message(message.chat.id, response_text[i:i+4000])
         else:
-            bot.reply_to(message, response_text, parse_mode='Markdown')
+            bot.reply_to(message, response_text)
     except Exception as e:
-        logger.error(f"Signal Error: {e}")
-        bot.reply_to(message, f"❌ Analysis fail ho gaya. Reason: {str(e)[:100]}")
+        logger.error(f"Signal error: {e}")
+        bot.reply_to(message, f"Analysis complete nahi ho paya. Reason: {str(e)[:150]}")
 
-@bot.message_handler(commands=['chart'])
+@bot.message_handler(func=lambda msg: msg.text and msg.text.split()[0].lower() in ['/chart', '/chart@alphabot_crypto_bot'])
 def handle_chart(message):
     try:
         parts = message.text.split()
         if len(parts) < 2:
-            bot.reply_to(message, "⚠️ Example: `/chart NVDA`", parse_mode='Markdown')
+            bot.reply_to(message, "Kripya stock symbol dein. Example: `/chart TSLA`", parse_mode='Markdown')
             return
-        ticker = parts[1].upper().strip()
-        bot.reply_to(message, f"📈 {ticker} ka chart ban raha hai...")
+        
+        ticker = parts[1].upper().replace(" ", "").strip()
+        bot.reply_to(message, f"{ticker} ka chart generate ho raha hai...")
         chart_buf = generate_chart(ticker)
         if chart_buf:
-            bot.send_photo(message.chat.id, chart_buf, caption=f"📊 {ticker} - 1 Month Chart")
+            bot.send_photo(message.chat.id, chart_buf, caption=f"Chart: {ticker} (Last 1 Month)")
         else:
-            bot.reply_to(message, f"❌ {ticker} ka data nahi mila.")
+            bot.reply_to(message, f"{ticker} ka market data nahi mila. Stock symbol check karein.")
     except Exception as e:
-        bot.reply_to(message, "❌ Chart generate nahi ho paya.")
+        bot.reply_to(message, f"Chart error: {e}")
 
 @bot.message_handler(commands=['history'])
 def handle_history(message):
     if db is None:
-        bot.reply_to(message, "❌ Database connected nahi hai.")
+        bot.reply_to(message, "Database connected nahi hai.")
         return
     try:
         rows = signals_collection.find().sort("timestamp", -1).limit(5)
-        text = "📜 *Last 5 Signals (MongoDB):*\n\n"
+        text = "Last 5 Saved Signals:\n\n"
         count = 0
         for row in rows:
-            text += f"🔹 *{row['ticker']}* on {row['date']}\n"
+            text += f"• {row.get('ticker')} ({row.get('date')})\n"
             count += 1
         if count == 0:
-            bot.reply_to(message, "📭 Abhi tak koi signal save nahi hua.")
+            bot.reply_to(message, "Abhi tak koi signal save nahi hua.")
         else:
-            bot.reply_to(message, text, parse_mode='Markdown')
+            bot.reply_to(message, text)
     except Exception as e:
-        bot.reply_to(message, "❌ History fetch karne mein error aaya.")
+        bot.reply_to(message, "History fetch nahi ho saki.")
 
-# --- 7. Start Polling in a Background Thread (Robust Retry) ---
+# --- 7. Telegram Background Polling ---
 def start_polling():
-    logger.info("🚀 Starting Telegram Polling...")
+    logger.info("Starting Telegram Polling...")
     while True:
         try:
             bot.infinity_polling(timeout=60, long_polling_timeout=30, skip_pending=True)
-        except telebot.apihelper.ApiTelegramException as e:
-            if e.error_code == 409:
-                logger.error("⚠️ 409 Conflict: Another instance is running. Retrying in 15 seconds...")
-                time.sleep(15)
-            else:
-                logger.error(f"❌ Telegram API Error: {e}")
-                time.sleep(5)
         except Exception as e:
-            logger.error(f"❌ Unexpected polling error: {e}")
+            logger.error(f"Polling warning: {e}")
             time.sleep(5)
 
 threading.Thread(target=start_polling, daemon=True).start()
 
-# --- 8. Flask App for Health Check ---
+# --- 8. Health Check for Render ---
 app = Flask(__name__)
 
 @app.route('/')
 def index():
-    return "Trading Bot is Running!", 200
+    return "Trading Bot is 100% Running!", 200
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 10000))
